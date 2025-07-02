@@ -1,0 +1,244 @@
+diff --git a/browser_use/cli.py b/browser_use/cli.py
+old mode 100644
+new mode 100755
+index 17d5199b..27b9012f
+--- a/browser_use/cli.py
++++ b/browser_use/cli.py
+@@ -179,11 +179,20 @@ def setup_readline_history(history: list[str]) -> None:
+ 
+ def get_llm(config: dict[str, Any]):
+ 	"""Get the language model based on config and available API keys."""
++	# Reload dotenv to ensure latest environment variables are loaded
++	load_dotenv()
++
+ 	# Set API keys from config if available
+ 	api_keys = config.get('model', {}).get('api_keys', {})
+ 	model_name = config.get('model', {}).get('name')
+ 	temperature = config.get('model', {}).get('temperature', 0.0)
+ 
++	# Check for DEFAULT_LLM environment variable
++	default_llm = os.getenv('DEFAULT_LLM')
++	default_llm_model = os.getenv('DEFAULT_LLM_MODEL')
++	print(default_llm, default_llm_model)
++
++
+ 	# Set environment variables if they're in the config but not in the environment
+ 	if api_keys.get('openai') and not CONFIG.OPENAI_API_KEY:
+ 		os.environ['OPENAI_API_KEY'] = api_keys['openai']
+@@ -209,19 +218,56 @@ def get_llm(config: dict[str, Any]):
+ 				sys.exit(1)
+ 			return ChatGoogle(model=model_name, temperature=temperature)
+ 
++	# Use DEFAULT_LLM if set
++	if default_llm:
++		if default_llm.lower() == 'openai':
++			if not CONFIG.OPENAI_API_KEY:
++				print('⚠️  OpenAI API key not found for DEFAULT_LLM. Falling back to auto-detection.')
++			else:
++				print('⚠️  OpenAI API key found for DEFAULT_LLM. ')
++				return ChatOpenAI(model=default_llm_model if default_llm_model else 'gpt-4o', temperature=temperature)
++		elif default_llm.lower() == 'anthropic':
++			if not CONFIG.ANTHROPIC_API_KEY:
++				print('⚠️  Anthropic API key not found for DEFAULT_LLM. Falling back to auto-detection.')
++			else:
++				print('⚠️  Anthropic API key found for DEFAULT_LLM. ')
++				return ChatAnthropic(
++					model=default_llm_model if default_llm_model else 'claude-3.5-sonnet-exp', temperature=temperature
++				)
++		elif default_llm.lower() == 'google':
++			if not CONFIG.GOOGLE_API_KEY:
++				print('⚠️  Google API key not found for DEFAULT_LLM. Falling back to auto-detection.')
++			else:
++				print('⚠️  Google API key found for DEFAULT_LLM. ')
++				return ChatGoogle(
++					model=default_llm_model if default_llm_model else 'gemini-2.0-flash-lite',
++					temperature=temperature,
++					base_url=os.getenv('GOOGLE_ENDPOINT'),
++				)
++		else:
++			print(f'⚠️  Invalid DEFAULT_LLM value: {default_llm}. Falling back to auto-detection.')
++
+ 	# Auto-detect based on available API keys
+ 	if CONFIG.OPENAI_API_KEY:
+-		return ChatOpenAI(model='gpt-4o', temperature=temperature)
++		return ChatOpenAI(model=default_llm_model if default_llm_model else 'gpt-4o', temperature=temperature)
+ 	elif CONFIG.ANTHROPIC_API_KEY:
+-		return ChatAnthropic(model='claude-3.5-sonnet-exp', temperature=temperature)
++		return ChatAnthropic(
++			model=default_llm_model if default_llm_model else 'claude-3.5-sonnet-exp', temperature=temperature
++		)
+ 	elif CONFIG.GOOGLE_API_KEY:
+-		return ChatGoogle(model='gemini-2.0-flash-lite', temperature=temperature)
++		return ChatGoogle(
++			model=default_llm_model if default_llm_model else 'gemini-2.0-flash-lite',
++			temperature=temperature,
++			base_url=os.getenv('GOOGLE_ENDPOINT'),
++		)
+ 	else:
+ 		print(
+ 			'⚠️  No API keys found. Please update your config or set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, or GOOGLE_API_KEY.'
+ 		)
+ 		sys.exit(1)
+ 
++	print(default_llm, default_llm_model)
++
+ 
+ class RichLogHandler(logging.Handler):
+ 	"""Custom logging handler that redirects logs to a RichLog widget."""
+@@ -793,8 +839,17 @@ class BrowserUseApp(App):
+ 				model_info.write(
+ 					f'[white]LLM:[/] [blue]{self.llm.__class__.__name__} [yellow]{model_name}[/] {temp_str}{vision_str}{planner_str}'
+ 				)
++				base_url = getattr(self.llm, 'base_url', None)
++				if base_url:
++					model_info.write(f'[white]Base URL:[/] [blue]{base_url}[/]')
+ 			else:
+ 				model_info.write(f'[white]LLM:[/] [blue]{self.llm.__class__.__name__} [yellow]{model_name}[/]')
++				base_url = getattr(self.llm, 'base_url', None)
++				if base_url:
++					model_info.write(f'[white]Base URL:[/] [blue]{base_url}[/]')
++				base_url = getattr(self.llm, 'base_url', None)
++				if base_url:
++					model_info.write(f'[white]Base URL:[/] [blue]{base_url}[/]')
+ 
+ 			# Show token usage statistics if agent exists and has history
+ 			if self.agent and hasattr(self.agent, 'state') and hasattr(self.agent.state, 'history'):
+@@ -923,7 +978,7 @@ class BrowserUseApp(App):
+ 									action_dict = action.model_dump(exclude_unset=True)
+ 									if action_dict:
+ 										action_name = list(action_dict.keys())[0]
+-										tasks_info.write(f'     {action_idx}. [blue]{action_name}[/]')
++										tasks_info.write(f'	 {action_idx}. [blue]{action_name}[/]')
+ 
+ 						# Show results or errors from this step
+ 						if item.result:
+@@ -948,7 +1003,9 @@ class BrowserUseApp(App):
+ 
+ 		# Force scroll to bottom
+ 		tasks_panel = self.query_one('#tasks-panel')
+-		tasks_panel.scroll_end(animate=False)
++		# Only scroll to the end if we're already at the end (or close to it)
++		if tasks_panel.scroll_y >= tasks_panel.virtual_size.height - tasks_panel.size.height - 1:
++			tasks_panel.scroll_end(animate=False)
+ 
+ 	def scroll_to_input(self) -> None:
+ 		"""Scroll to the input field to ensure it's visible."""
+@@ -1104,7 +1161,7 @@ class BrowserUseApp(App):
+ 			# Links panel with URLs
+ 			with Container(id='links-panel'):
+ 				with HorizontalGroup(classes='link-row'):
+-					yield Static('Run at scale on cloud:    [blink]☁️[/]  ', markup=True, classes='link-label')
++					yield Static('Run at scale on cloud:	[blink]☁️[/]  ', markup=True, classes='link-label')
+ 					yield Link('https://browser-use.com', url='https://browser-use.com', classes='link-white link-url')
+ 
+ 				yield Static('')  # Empty line
+@@ -1124,7 +1181,7 @@ class BrowserUseApp(App):
+ 					)
+ 
+ 				with HorizontalGroup(classes='link-row'):
+-					yield Static('[dim]Report any issues:[/]        🐛 ', markup=True, classes='link-label')
++					yield Static('[dim]Report any issues:[/]		🐛 ', markup=True, classes='link-label')
+ 					yield Link(
+ 						'https://github.com/browser-use/browser-use/issues',
+ 						url='https://github.com/browser-use/browser-use/issues',
+@@ -1133,7 +1190,7 @@ class BrowserUseApp(App):
+ 
+ 			# Paths panel
+ 			yield Static(
+-				f' ⚙️  Settings & history saved to:    {str(CONFIG.BROWSER_USE_CONFIG_FILE.resolve()).replace(str(Path.home()), "~")}\n'
++				f' ⚙️  Settings & history saved to:	{str(CONFIG.BROWSER_USE_CONFIG_FILE.resolve()).replace(str(Path.home()), "~")}\n'
+ 				f' 📁 Outputs & recordings saved to:  {str(Path(".").resolve()).replace(str(Path.home()), "~")}',
+ 				id='paths-panel',
+ 				markup=True,
+@@ -1146,7 +1203,7 @@ class BrowserUseApp(App):
+ 			# Task input container (now at the bottom)
+ 			with Container(id='task-input-container'):
+ 				yield Label('🔍 What would you like me to do on the web?', id='task-label')
+-				yield Input(placeholder='Enter your task...', id='task-input')
++				yield Input(value='访问 https://newsforkids.net, 然后什么也不干', id='task-input')
+ 
+ 		yield Footer()
+ 
+@@ -1183,6 +1240,7 @@ async def run_prompt_mode(prompt: str, ctx: click.Context, debug: bool = False):
+ 		browser_session = BrowserSession(
+ 			browser_profile=profile,
+ 		)
++		await browser_session.start()
+ 
+ 		# Create and run agent
+ 		agent = Agent(
+@@ -1241,11 +1299,39 @@ async def textual_interface(config: dict[str, Any]):
+ 			logger.info('Browser mode: visible')
+ 
+ 		# Create BrowserSession directly with config parameters
+-		# Create BrowserProfile with user_data_dir
+-		profile = BrowserProfile(user_data_dir=str(USER_DATA_DIR), **browser_config)
+-		browser_session = BrowserSession(
+-			browser_profile=profile,
++		# Read browser settings from environment variables
++		browser_path = os.getenv('BROWSER_PATH')
++		browser_user_data = os.getenv('BROWSER_USER_DATA')
++		browser_debugging_port = os.getenv('BROWSER_DEBUGGING_PORT')
++		browser_debugging_host = os.getenv('BROWSER_DEBUGGING_HOST')
++		keep_browser_open = os.getenv('KEEP_BROWSER_OPEN') == 'true'
++		use_own_browser = os.getenv('USE_OWN_BROWSER') == 'true'
++		browser_cdp = os.getenv('BROWSER_CDP')
++
++		# Use BROWSER_USER_DATA if provided, otherwise use the default USER_DATA_DIR
++		user_data_dir = browser_user_data if browser_user_data else str(USER_DATA_DIR)
++
++		# Create BrowserProfile with user_data_dir and environment variables
++		browser_config.pop('user_data_dir', None)
++		browser_config.pop('keep_alive', None)
++		browser_config.pop('executable_path', None)
++		profile = BrowserProfile(
++			user_data_dir=user_data_dir,
++			executable_path=browser_path,
++			keep_alive=keep_browser_open,
++			**browser_config,
+ 		)
++		if use_own_browser and browser_cdp:
++			browser_session = BrowserSession(
++				browser_profile=profile,
++				cdp_url=browser_cdp,
++			)
++			logger.info(f"Connecting to existing browser at {browser_cdp}")
++		else:
++			browser_session = BrowserSession(
++				browser_profile=profile,
++			)
++			await browser_session.start()
+ 		logger.debug('BrowserSession initialized successfully')
+ 
+ 		# Log browser version if available
+diff --git a/browser_use/llm/google/chat.py b/browser_use/llm/google/chat.py
+index 4a9495a0..af29600a 100644
+--- a/browser_use/llm/google/chat.py
++++ b/browser_use/llm/google/chat.py
+@@ -5,7 +5,7 @@ from typing import Any, Literal, TypeVar, overload
+ from google import genai
+ from google.auth.credentials import Credentials
+ from google.genai import types
+-from google.genai.types import MediaModality
++from google.genai.types import MediaModality, HttpOptions
+ from pydantic import BaseModel
+ 
+ from browser_use.llm.base import BaseChatModel
+@@ -78,6 +78,7 @@ class ChatGoogle(BaseChatModel):
+ 
+ 	# Client initialization parameters
+ 	api_key: str | None = None
++	base_url: str | None = None
+ 	vertexai: bool | None = None
+ 	credentials: Credentials | None = None
+ 	project: str | None = None
+@@ -104,6 +105,9 @@ class ChatGoogle(BaseChatModel):
+ 		# Create client_params dict with non-None values
+ 		client_params = {k: v for k, v in base_params.items() if v is not None}
+ 
++		if self.base_url:
++			client_params['http_options'] = HttpOptions(base_url=self.base_url)
++
+ 		return client_params
+ 
+ 	def get_client(self) -> genai.Client:
